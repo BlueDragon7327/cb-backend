@@ -26,6 +26,13 @@ const UserSchema = new mongoose.Schema({
   username: String,
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
+  profile: {
+    avatar: { type: String, default: '' },
+    aboutMe: { type: String, default: '' },
+    status: { type: String, default: 'online' },
+    customStatus: { type: String, default: '' },
+    backgroundColor: { type: String, default: '#7C3AED' }
+  }
 });
 const User = mongoose.model('User', UserSchema);
 
@@ -70,6 +77,11 @@ app.post('/api/login', async (req, res) => {
 // GET /api/messages?user1=Alice&user2=Bob
 app.get('/api/messages', async (req, res) => {
   const { user1, user2 } = req.query;
+  
+  if (user1 === user2) {
+    return res.status(400).json({ error: "Cannot fetch messages with yourself" });
+  }
+
   try {
     const messages = await Message.find({
       $or: [
@@ -77,7 +89,8 @@ app.get('/api/messages', async (req, res) => {
         { sender: user2, recipient: user1 }
       ]
     }).sort({ createdAt: 1 });
-    res.json(messages);
+    
+    res.json(messages || []);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -105,6 +118,40 @@ app.get('/api/dmList', async (req, res) => {
   }
 });
 
+// Add new profile endpoints
+app.get('/api/profile/:username', async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.params.username });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json({ username: user.username, profile: user.profile });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/profile/:username', async (req, res) => {
+  try {
+    const user = await User.findOneAndUpdate(
+      { username: req.params.username },
+      { $set: { profile: req.body.profile } },
+      { new: true }
+    );
+    res.json({ username: user.username, profile: user.profile });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Add user verification endpoint
+app.get('/api/user/:username/exists', async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.params.username });
+    res.json({ exists: !!user });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // WebSocket DM Logic
 const users = {}; // Maps username -> socket.id
 
@@ -119,18 +166,26 @@ io.on('connection', (socket) => {
   // When a DM is sent, store it and send it to the recipient
   socket.on('sendMessage', async (data) => {
     const { sender, recipient, message } = data;
+    
+    // Prevent self-messaging
+    if (sender === recipient) {
+      return;
+    }
+
     try {
       const newMessage = new Message({ sender, recipient, message });
       await newMessage.save();
+      
+      const targetSocketId = users[recipient];
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('receiveMessage', data);
+      }
+      // Echo back to sender
+      socket.emit('receiveMessage', data);
     } catch (error) {
       console.error('Error saving message:', error);
+      socket.emit('messageError', { error: 'Failed to send message' });
     }
-    const targetSocketId = users[recipient];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('receiveMessage', data);
-    }
-    // Echo back to sender
-    socket.emit('receiveMessage', data);
   });
 
   socket.on('disconnect', () => {
