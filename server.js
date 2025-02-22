@@ -6,6 +6,8 @@ const socketIo = require('socket.io');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
+const multer = require('multer');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -15,6 +17,43 @@ const io = socketIo(server, { cors: { origin: '*' } });
 // Middleware
 app.use(express.json());
 app.use(cors());
+
+const uploadFolder = path.join(__dirname, 'uploads');
+// Ensure the uploads folder exists:
+const fs = require('fs');
+if (!fs.existsSync(uploadFolder)) {
+  fs.mkdirSync(uploadFolder, { recursive: true });
+}
+
+// Configure Multer storage
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadFolder);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + '-' + file.originalname);
+  }
+});
+const upload = multer({ storage });
+
+// Serve static files from the uploads folder.
+app.use('/uploads', express.static(uploadFolder));
+
+// File upload route
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  try {
+    if (!req.file) {
+      console.error("No file received");
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    res.json({ fileUrl });
+  } catch (error) {
+    console.error("Upload error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
@@ -160,7 +199,22 @@ io.on('connection', (socket) => {
 
   socket.on('registerUser', (username) => {
     users[username] = socket.id;
+    io.emit('onlineUsers', Object.keys(users)); // broadcast online users
     console.log(`User registered: ${username} with socket ${socket.id}`);
+  });
+  
+  // New Typing event handling:
+  socket.on("typing", (data) => {
+    const targetSocketId = users[data.recipient];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("typing", data);
+    }
+  });
+  socket.on("stopTyping", (data) => {
+    const targetSocketId = users[data.recipient];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("stopTyping", data);
+    }
   });
 
   // When a DM is sent, store it and send it to the recipient
@@ -196,7 +250,13 @@ io.on('connection', (socket) => {
         break;
       }
     }
+    io.emit('onlineUsers', Object.keys(users)); // update online users on disconnect
   });
+});
+
+// Optional: GET /api/online endpoint
+app.get('/api/online', (req, res) => {
+  res.json({ online: Object.keys(users) });
 });
 
 server.listen(3003, () => console.log('Server running on port 3003'));
